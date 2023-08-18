@@ -1,5 +1,3 @@
-#define MAP_EDITOR_TOOL_ONLY
-
 using System.Collections;
 using System.IO;
 using UnityEngine;
