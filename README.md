@@ -2,7 +2,7 @@
 
 Usage (note for self):
 - Install `TextMesh Pro` extension;
-- Add the layer `` at index 3;
+- Add the layer `ADD_ITEM_LAYER` by index 3;
 - Copy files and select `Main` scene;
 - Add `Main` scene in to `Build Settings` window;
 - Build programm;
