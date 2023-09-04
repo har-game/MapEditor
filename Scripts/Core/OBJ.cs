@@ -11,10 +11,124 @@ using API;
 
 namespace HAR.Core {
 	
-    public static class OBJ { 
+    public static class OBJ {
+	
+		public static bool HasObjectInCache( string mod, string objName ) {
+			var path = Path.Combine( Config.ModsDirectory, mod, $"{objName}.obj" );
+			return loadedGameObjects.ContainsKey( path );
+		}
+		public static void ClearCaches() {
+			foreach( var go in loadedGameObjects.Values )
+				GameObject.Destroy( go );
+			loadedGameObjects.Clear();
+			foreach( var materialFile in loadedMaterials.Values ) {
+				foreach( var material in materialFile.Values )
+					UnityEngine.Object.Destroy( material );
+				materialFile.Clear();
+			}	
+			loadedMaterials.Clear();
+			foreach( var texture in loadedTextures.Values )
+				UnityEngine.Object.Destroy( texture );
+			loadedTextures.Clear();
+		}
+		public static void Create( string mod, string objName, Action<GameObject> onCompleted ) => loadModelOrGetFromCache( mod, $"{objName}.obj", $"{objName}.mtl", onCompleted );
+		
+		#region NO_CACHE
+		public static void CreateNoCached( string mod, string objName, Action<GameObject> onCompleted ) => loadModelNoCache( mod, $"{objName}.obj", $"{objName}.mtl", onCompleted );
+		
+		private static void loadTextureNoCache( string mod, string name, Action<Texture2D> onCompleted, bool isNormal = false ) {
+			var path = Path.Combine( Config.ModsDirectory, mod, name );
+			Async.Run( delegate { return readTextureFile( path ); }, bytes => {
+				Texture2D result = null;
+				if( bytes.Length > 0 ) {
+					try {
+						var tmpTexture2D = createDefaultTexture();
+						if( tmpTexture2D.LoadImage( bytes ) ) {
+							if( isNormal )
+								makeNormalMap( ref tmpTexture2D );
+							tmpTexture2D.Apply();
+							tmpTexture2D.name = name;
+						}
+						result = tmpTexture2D;
+					} catch( Exception e ) { API.Logger.Print( e.Message ); }	
+				} else { result = createDefaultTexture(); }
+				onCompleted.Invoke( result );
+			} );	
+		}
+		private static void loadMaterialsNoChache( string mod, string name, Action<Dictionary<string, Material>> onCompleted ) {
+			var path = Path.Combine( Config.ModsDirectory, mod, name );
+			Async.Run( delegate { return readMtlFile( path ); }, data => {
+				var isTextureLoaded = makeMaterialsNoCache( mod, data, out var dict );
+				Async.Wait( isTextureLoaded, delegate { onCompleted.Invoke( dict ); } );
+			} );
+		}
+		private static Func<bool> makeMaterialsNoCache( string mod, Dictionary<string, MaterialData> materialsData, out Dictionary<string, Material> result ) {
+			result = new Dictionary<string, Material>();
+			var numSteps = 0;
+			var stepsCounter = 0;
+			try {
+				var tmpResult = new Dictionary<string, Material>();
+				foreach( var md in materialsData ) {
+					var matName = md.Key;
+					var data = md.Value;
+					var currentMaterial = createDefaultMaterial( matName );
+					if( data.UseKd ) {
+						currentMaterial.SetColor( "_Color", data.Kd );
+					} else {
+						currentMaterial.SetColor( "_Color", data.D );
+					}
+					currentMaterial.SetFloat( "_Glossiness", 0f ); // no smoothness
 
-		public static void Create( string mod, string objName, Action<GameObject> onCompleted ) => loadModelOrGetFromCache( $"{mod}.obj", $"{objName}.mtl", objName, onCompleted );
-
+					if( data.UseMapKd ) {
+						numSteps += 1;
+						loadTextureNoCache( mod, data.MapKd, texture => {
+							currentMaterial.SetTexture( "_MainTex", texture );
+							stepsCounter += 1;
+						} );
+					}
+					if( data.UseMapD ) {
+						numSteps += 1;
+						loadTextureNoCache( mod, data.MapD, texture => {
+							currentMaterial.SetTexture( "_MainTex", texture );
+							stepsCounter += 1;
+						} );
+					}
+					if( data.UseMapBump ) {
+						numSteps += 1;
+                        currentMaterial.SetFloat( "_BumpScale", 0.3f );
+                        currentMaterial.EnableKeyword( "_NORMALMAP" );
+						loadTextureNoCache( mod, data.MapBump, texture => {
+							currentMaterial.SetTexture( "_BumpMap", texture );
+							stepsCounter += 1;
+						}, true );
+					}
+					if( data.UseKs )
+						currentMaterial.SetColor( "_SpecColor", data.Ks );
+					if( data.UseKa ) {
+						currentMaterial.SetColor( "_EmissionColor", data.Ka );
+						currentMaterial.EnableKeyword( "_EMISSION" );
+					}
+					//if( data.UseNs )
+					//	currentMaterial.SetFloat( "_Glossiness", data.Ns );
+					tmpResult.Add( matName, currentMaterial );
+				}
+				result = tmpResult;
+			} catch( Exception e ) { API.Logger.Print( e.Message ); }
+			return delegate { return stepsCounter != numSteps; };
+		}
+		private static void loadModelNoCache( string mod, string objName, string mtlName, Action<GameObject> onCompleted ) {
+			var path = Path.Combine( Config.ModsDirectory, mod, objName );
+			loadMaterialsNoChache( mod, mtlName, materials => {
+				Async.Run( delegate { return readObjFile( path ); }, objects => {
+					var go = createGameObject( objects, materials );
+					go.name = objName;
+					go.SetActive( false );
+					onCompleted.Invoke( go );
+				} );
+			} );
+		}
+		#endregion
+		
 		#region TEXTURES
 		private static readonly Dictionary<string, Texture2D> loadedTextures = new Dictionary<string, Texture2D>();
 		private static void loadTextureOrGetFromCache( string mod, string name, Action<Texture2D> onCompleted, bool isNormal = false ) {
@@ -335,12 +449,14 @@ namespace HAR.Core {
 				var od = objectsData.First();
 				result.AddComponent<MeshFilter>().sharedMesh = od.Value.CreateMesh( od.Key );
 				result.AddComponent<MeshRenderer>().sharedMaterials = od.Value.CreateMaterials( materials );
+				result.AddComponent<MeshCollider>();
 				result.name = od.Key;
 			} else {
 				foreach( var od in objectsData ) {
 					var subObject = new GameObject( od.Key );
 					subObject.AddComponent<MeshFilter>().sharedMesh = od.Value.CreateMesh( od.Key );
 					subObject.AddComponent<MeshRenderer>().sharedMaterials = od.Value.CreateMaterials( materials );
+					subObject.AddComponent<MeshCollider>();
 					subObject.transform.SetParent( result.transform );
 				}
 				//combineMeshes( result );

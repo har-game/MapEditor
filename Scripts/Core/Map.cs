@@ -10,107 +10,87 @@ using UnityEngine;
 namespace HAR.Core {
 
 	public sealed class Map {
-
-		private static bool disableStreaming;
-		private static int lastRow, lastColumn, currentRow, currentColumn;
-		private static string lastSectionHash, lastMapFilePath;
-		private static Dictionary<string, Map> loadedMaps;
-		private static Dictionary<string, GameObject> streamedSections;
-
-		private static void resetSetting() {
-			(lastRow, lastColumn, currentRow, currentColumn) = (0, 0, 0, 0);
-			(lastSectionHash, lastMapFilePath) = (string.Empty, string.Empty);
-			disableStreaming = true;
-		}
-		private static void getSectionPosition( Vector3 position, out int row, out int column ) {
-			row = ( int ) Math.Round( position.x / HAR.Config.SectionSize );
-			column = ( int ) Math.Round( position.z / HAR.Config.SectionSize );
-		}
-		private static string getSectionHash( int row, int column ) => $"{row}_{column}";
-		private static string getSectionHash( Vector3 position ) {
-			getSectionPosition( position, out var row, out var column );
-			return getSectionHash( row, column );
-		}
-		private static string getSectionHash( Vector3 position, out int row, out int column ) {
-			getSectionPosition( position, out var tmpRow, out var tmpColumn );
-			(row, column) = (tmpRow, tmpColumn);
-			return getSectionHash( tmpRow, tmpColumn );
-		}
-		private static void generateSectionsForRebuild( Dictionary<string, MapObject[]> data, out string[] sectionToLoad, out string[] sectionToDestroy ) {
-			var subLastRow = lastRow - 1;			// x - 1
-			var addLastRow = lastRow + 1;			// x + 1
-			var subLastCol = lastColumn - 1;		// z - 1
-			var addLastCol = lastColumn + 1;		// z + 1
-			var subCurrentRow = currentRow - 1;		// x - 1
-			var addCurrentRow = currentRow + 1;		// x + 1
-			var subCurrentCol = currentColumn - 1;	// z - 1
-			var addCurrentCol = currentColumn + 1;	// z + 1
-			var lastSections = new string[] {
-				getSectionHash( subLastRow,	addLastCol ),
-				getSectionHash( lastRow,	addLastCol ),
-				getSectionHash( addLastRow,	addLastCol ),
-				getSectionHash( subLastRow,	lastColumn ),
-				getSectionHash( lastRow,	lastColumn ),
-				getSectionHash( addLastRow,	lastColumn ),
-				getSectionHash( subLastRow,	subLastCol ),
-				getSectionHash( lastRow,	subLastCol ),
-				getSectionHash( addLastRow,	subLastCol )
-			};
-			var nextSections = new string[] {
-				getSectionHash( subCurrentRow, 	addCurrentCol ),
-				getSectionHash( currentRow,		addCurrentCol ),
-				getSectionHash( addCurrentRow,	addCurrentCol ),
-				getSectionHash( subCurrentRow,	currentColumn ),
-				getSectionHash( currentRow,		currentColumn ),
-				getSectionHash( addCurrentRow,	currentColumn ),
-				getSectionHash( subCurrentRow,	subCurrentCol ),
-				getSectionHash( currentRow,		subCurrentCol ),
-				getSectionHash( addCurrentRow,	subCurrentCol )
-			};	
-			sectionToLoad = ( from ls in lastSections from ns in nextSections where ls != ns && data.ContainsKey( ns ) select ns ).ToArray();
-			sectionToDestroy = ( from ns in nextSections where !streamedSections.ContainsKey( ns ) select ns ).ToArray();
-			(lastRow, lastColumn) = (currentRow, currentColumn);
-		}
-		private static void rebuildSections( Dictionary<string, MapObject[]> data, string[] sectionToLoad, string[] sectionToDestroy ) {
-			var currentStep = 0;		
-			var numSteps = 0;	
-			Func<bool> isLoadingDone = delegate { return currentStep != numSteps; };
-			foreach( var section in sectionToLoad ) {
-				if( !streamedSections.ContainsKey( section ) )
-					streamedSections.Add( section, new GameObject( section ) );
-				foreach( var mapObject in data[ section ] ) {
-					#if MAP_EDITOR_TOOL_ONLY
-					if( mapObject.DontUse )
-						continue;
-					#endif
-					var mo = mapObject;
-					var goName = numSteps.ToString();
-					numSteps += 1;
-					HAR.Core.OBJ.Create( mo.Mod, mo.File, gameObject => {
-						var go = GameObject.Instantiate( gameObject );
-						go.name = goName;
-						go.transform.SetParent( streamedSections[ section ].transform );
-						go.transform.localPosition = mo.Position;
-						go.transform.localRotation = mo.Rotation;
-						go.SetActive( true );
-						currentStep += 1;
-					} );
-				}
-			}
-			API.Async.Wait( isLoadingDone, delegate {
-				for( int i = 0; i < sectionToDestroy.Length; ++i ) {
-					GameObject.Destroy( streamedSections[ sectionToDestroy[ i ] ] );
-					streamedSections.Remove( sectionToDestroy[ i ] );
-				}
-				disableStreaming = false; 
-			} );
-		}
 		
-		public static void Initialize( Action<bool> onCompleted ) {
-			(loadedMaps, streamedSections) = (new Dictionary<string, Map>(), new Dictionary<string, GameObject>());
-			resetSetting();
+		static Map() {
+			DeleteItem = name => {
+				var split = name.Split( '_' );
+				currentMap.objects[ split[ 0 ] ][ int.Parse( split[ 1 ] ) ].IsRemoved = true;	
+			};
+			FindItem = name => {
+				var split = name.Split( '_' );
+				return currentMap.objects[ split[ 0 ] ][ int.Parse( split[ 1 ] ) ];
+			};
+			UpdateItem = ( name, data ) => {
+				var split = name.Split( '_' );
+				var oldSection = split[ 0 ];
+				var oldIndex = int.Parse( split[ 1 ] );
+				var oldData = currentMap.objects[ oldSection ][ oldIndex ];
+				data.Mod = oldData.Mod;
+				data.File = oldData.File;
+				currentMap.objects[ oldSection ][ oldIndex ].IsRemoved = true;
+				var newSection = getSectionHash( data.Position );
+				var newIndex = 0;
+				if( newSection == oldSection ) {
+					newIndex = currentMap.objects[ newSection ].Length;
+				} else {
+					if( currentMap.objects.ContainsKey( newSection ) ) {
+						newIndex = currentMap.objects[ newSection ].Length;
+					} else {
+						currentMap.objects.Add( newSection, new MapObject[ 0 ] );
+						var newSectionTransform = new GameObject( newSection ).transform;
+						currentMap.sections.Add( newSection, newSectionTransform );
+						newSectionTransform.SetParent( currentMap.root );
+					}
+					MapsViewer.SetParentForTarget.Invoke( currentMap.sections[ newSection ] );
+				}
+				var arr = currentMap.objects[ newSection ];
+				var newHash = $"{newSection}_{newIndex}";
+				Array.Resize( ref arr, newIndex + 1 );
+				currentMap.objects[ newSection ] = arr;
+				currentMap.objects[ newSection ][ newIndex ] = data;
+				MapsViewer.UpdateTargetData.Invoke( newHash, data.Position, data.Rotation );
+			};
+			AddItem += (mod, file, position ) => {
+				OBJ.Create( mod, file, go => {
+					var section = getSectionHash( position );
+					if( !currentMap.sections.ContainsKey( section ) ) {
+						var newSectionTransform = new GameObject( section ).transform;
+						currentMap.sections.Add( section, newSectionTransform );
+						currentMap.objects.Add( section, new MapObject[ 0 ] );
+						newSectionTransform.SetParent( currentMap.root );
+					}
+					var arr = currentMap.objects[ section ];
+					var index = currentMap.objects[ section ].Length;
+					var hash = $"{section}_{index}";
+					var data = new MapObject() {
+						Mod = mod, File = file, Position = position,
+						Rotation = Quaternion.Euler( 0f, 0f, 0f ),
+						OnHour = 0, OffHour = 0, IsRemoved = false
+					};
+					Array.Resize( ref arr, index + 1 );
+					go.transform.SetParent( currentMap.sections[ section ] );
+					go.transform.position = position;
+					go.name = hash;
+					currentMap.objects[ section ] = arr;
+					currentMap.objects[ section ][ index ] = data;
+					go.SetActive( true );
+					OnNewObjectAdded.Invoke( go.transform );
+				} );
+			};
+		}
+
+		public static event Action<Transform> OnNewObjectAdded;
+		public static Action<string, string, Vector3> AddItem;
+		public static Action<string> DeleteItem;
+		public static Func<string, MapObject> FindItem;
+		public static Action<string, MapObject> UpdateItem;
+		
+		public static void Load( string path, Action<bool> onCompleted ) => new Map( path, onCompleted );
+		public static void FindAllPaths( Action<bool, string[]> onCompleted ) {
+			string[] result = null;
 			API.Async.Run( delegate {
 				try {
+					var tmpResult = new Dictionary<string, bool>();
 					var dirs = Directory.GetDirectories( Config.ModsDirectory );
 					foreach( var modDir in dirs ) {
 						var modName = new DirectoryInfo( modDir ).Name;
@@ -121,212 +101,262 @@ namespace HAR.Core {
 							var mapName = Path.GetFileNameWithoutExtension( new FileInfo( mapFile ).Name );
 							if( !Config.IsValidMapName( mapName ) )
 								continue;
-							Add( mapFile );
+							tmpResult.Add( mapFile, false );
 						}
 					}
+					result = tmpResult.Keys.ToArray();
 					return true;
 				} catch( Exception e ) { API.Logger.Print( e.Message ); }
 				return false;
-			}, state => { onCompleted.Invoke( state ); } );
+			}, state => { onCompleted.Invoke( state, result ); } );
 		}
-		public static void Each( Action<string> action ) {
-			foreach( var path in loadedMaps )
-				action.Invoke( path.Key );
+		public static void Stream( Vector3 position, out string currentSectionHash ) {
+			currentSectionHash = string.Empty;
+			if( currentMap == null )
+				return;
+			currentMap.stream( position, out currentSectionHash );
+		} 
+		public static void Unload( Action onCompleted ) {
+			if( currentMap != null ) {
+				currentMap.unload();
+				currentMap = null;
+			}
+			onCompleted.Invoke();
+			return;
 		}
-		public static string GetFullPath( string mod, string map ) => Path.Combine( HAR.Config.ModsDirectory, mod, $"{map}.map" );
-		public static bool Add( string mod, string map ) => Add( GetFullPath( mod, map ) );
-		public static bool Add( string path ) {
-			if( loadedMaps.ContainsKey( path ) )
-				return false;
-			try {
-				if( !File.Exists( path ) )
-					File.WriteAllText( path, "#" );
-				loadedMaps.Add( path, new Map( path ) );
-				return true;
-			} catch( Exception e ) { API.Logger.Print( e.Message ); }
-			return false;
-		}
-		public static bool Remove( string mod, string map ) => Remove( GetFullPath( mod, map ) );
-		public static bool Remove( string path ) {
-			if( !loadedMaps.ContainsKey( path ) )
-				return false;
-			try {
-				if( File.Exists( path ) )
-					File.Delete( path );
-				loadedMaps.Remove( path );
-				return true;
-			} catch( Exception e ) { API.Logger.Print( e.Message ); }
-			return false;
-		}
-		public static void Load( string mod, string map, Action<bool> onCompleted ) => Load( GetFullPath( mod, map ), onCompleted );
-		public static void Load( string path, Action<bool> onCompleted ) {
-			if( path.Length == 0 || !loadedMaps.ContainsKey( path ) ) {
-				onCompleted.Invoke( false );
+		public static void Save( Action<bool> onCompleted ) {
+			if( currentMap == null ) {
+				onCompleted.Invoke( true );
 				return;
 			}
-			if( lastMapFilePath.Length > 0 ) {
-				if( lastMapFilePath == path ) {
+			currentMap.export( onCompleted );
+		}
+
+		private const byte MAX_SECTIONS_COUNT = 9;
+		private static float SECTION_SIZE = 300f;
+		
+		private static Map currentMap = null;
+	
+		private static void getSectionPosition( Vector3 position, out int row, out int column ) {
+			column = ( int ) Math.Round( position.x / SECTION_SIZE );
+			row = ( int ) Math.Round( position.z / SECTION_SIZE );
+		}
+		private static string getSectionHash( int row, int column ) => $"{column}x{row}";
+		private static string getSectionHash( Vector3 position ) {
+			getSectionPosition( position, out var row, out var column );
+			return getSectionHash( row, column );
+		}
+		private static string getSectionHash( Vector3 position, out int row, out int column ) {
+			getSectionPosition( position, out var tmpRow, out var tmpColumn );
+			(row, column) = (tmpRow, tmpColumn);
+			return getSectionHash( tmpRow, tmpColumn );
+		}
+
+		private string lastSectionHash, currentMapPath;
+		private Transform root;
+		private Dictionary<string, MapObject[]> objects;
+		private Dictionary<string, Transform> sections;
+		private StringBuilder comments;
+		
+		private string[] lastSectionsHashes;
+		
+		private Map( string path, Action<bool> onCompleted ) {
+			if( currentMap != null ) {	
+				if( currentMap.currentMapPath == path ) {
 					onCompleted.Invoke( true );
 					return;
 				}
-				loadedMaps[ lastMapFilePath ].unload();
+				unload();
 			}
-			resetSetting();
-			DestroyAllStreamedSections();
-			loadedMaps[ path ].load( state => {
-				if( state )
-					lastMapFilePath = path;
-				onCompleted.Invoke( state );
+			lastSectionsHashes = new string[ MAX_SECTIONS_COUNT ];
+			for( int i = 0; i < MAX_SECTIONS_COUNT; ++i )
+				lastSectionsHashes[ i ] = string.Empty;
+			(currentMapPath, lastSectionHash) = (path, string.Empty);
+			(objects, sections, comments) = (new Dictionary<string, MapObject[]>(), new Dictionary<string, Transform>(), new StringBuilder());
+			root = new GameObject( "MAP" ).transform;
+			readFile( path, state => {
+				if( !state ) {
+					onCompleted.Invoke( false );
+					return;
+				}
+				var currentStep = 0;		
+				var numSteps = 0;
+				foreach( var o in objects ) {
+					var indexName = 0;
+					var mapObject = o.Value;
+					var namePrefix = new String( o.Key );
+					var sectionTransform = new GameObject( namePrefix ).transform;
+					sectionTransform.SetParent( root );
+					sections.Add( namePrefix, sectionTransform );
+					foreach( var item in mapObject ) {
+						var mo = item;
+						var goName = $"{namePrefix}_{indexName}";
+						numSteps += 1;
+						indexName += 1;
+						HAR.Core.OBJ.Create( mo.Mod, mo.File, gameObject => {
+							var go = GameObject.Instantiate( gameObject );
+							go.name = goName;
+							go.transform.SetParent( sectionTransform );
+							go.transform.localPosition = mo.Position;
+							go.transform.localRotation = mo.Rotation;
+							go.SetActive( true );
+							currentStep += 1;
+						} );
+					}
+					sectionTransform.gameObject.SetActive( false );
+				}
+				Func<bool> isDone = delegate { return currentStep != numSteps; };
+				API.Async.Wait( isDone, delegate {
+					currentMap = this;
+					onCompleted.Invoke( state ); 
+				} );
 			} );
 		}
 		
-		#if MAP_EDITOR_TOOL_ONLY
-		public static bool CloneCurrentMapData( out Dictionary<string, MapObject[]> data ) {
-			data = new Dictionary<string, MapObject[]>();
-			if( lastMapFilePath.Length == 0 || !loadedMaps.ContainsKey( lastMapFilePath ) )
-				return false;
-			var currentMap = loadedMaps[ lastMapFilePath ];
-			foreach( var dict in currentMap.staticObjects )
-				data.Add( dict.Key, dict.Value );
-			return true;
+		private void unload() {
+			GameObject.Destroy( root.gameObject );
+			HAR.Core.OBJ.ClearCaches();
+			comments.Clear();
+			objects.Clear();
+			sections.Clear();
+			(lastSectionsHashes, currentMap) = (null, null);
 		}
-		public static void ExportCurrentMap( Action<bool> onCompleted ) {
+		private void readFile( string path, Action<bool> onCompleted ) {
 			API.Async.Run( delegate {
 				try {
-					
+					var tmpObjects = new Dictionary<string, List<MapObject>>();
+					var tmpComments = new StringBuilder();
+					var commentsMode = true;
+					using( TextReader reader = new StreamReader( path ) ) {
+						while( reader.Peek() > -1 ) {
+							var line = reader.ReadLine();
+							var ln = Regex.Replace( line, "[ \t]{1,}", " ", RegexOptions.Compiled ).Trim();
+							if( ln.Length == 0 ) {
+								tmpComments.AppendLine( line );
+								continue;
+							}
+							if( ln[ 0 ] == '#' ) {
+								commentsMode = false;
+								tmpComments.AppendLine( line );
+								continue;
+							}
+							if( commentsMode ) {
+								tmpComments.AppendLine( line );
+								continue;
+							}
+							var split = ln.Split( ' ' );
+							if( split[ 0 ] != "ADD_OBJECT" ) {
+								tmpComments.AppendLine( line );
+								continue;
+							}
+							var item = new MapObject() {
+								Mod = split[ 1 ],
+								File = split[ 2 ],
+								Position = new Vector3( 
+									float.Parse( split[ 3 ] ), 
+									float.Parse( split[ 4 ] ), 
+									float.Parse( split[ 5 ] )
+								), 
+								Rotation = Quaternion.Euler( 
+									float.Parse( split[ 6 ] ),
+									float.Parse( split[ 7 ] ),
+									float.Parse( split[ 8 ] ) 
+								),
+								OnHour = byte.Parse( split[ 9 ] ),
+								OffHour = byte.Parse( split[ 10 ] ),
+								IsRemoved = false
+							};
+							var fileName = Path.Combine( HAR.Config.ModsDirectory, split[ 1 ], $"{split[ 2 ]}.obj" );
+							if( !File.Exists( fileName ) ) {
+								tmpComments.AppendLine( line );
+								continue;
+							}
+							
+							// if ! exsist move to comment!!!
+							var hash = getSectionHash( item.Position );
+							if( !tmpObjects.ContainsKey( hash ) )
+								tmpObjects.Add( hash, new List<MapObject>() );
+							tmpObjects[ hash ].Add( item );
+						}	
+					}
+					if( commentsMode )
+						tmpComments.AppendLine( "#" );
+					comments.Append( tmpComments );
+					foreach( var item in tmpObjects )
+						objects.Add( item.Key, item.Value.ToArray() );
 					return true;
 				} catch( Exception e ) { API.Logger.Print( e.Message ); }
 				return false;
 			}, state => { onCompleted.Invoke( state ); } );
 		}
-		#endif
-		
-		public static void DestroyAllStreamedSections() {
-			foreach( var item in streamedSections )
-				GameObject.Destroy( item.Value );
-			streamedSections.Clear();
-		}
-		public static void Stream( Vector3 position ) {
-			if( lastMapFilePath.Length == 0 || !loadedMaps.ContainsKey( lastMapFilePath ) )
-				return;
-			Stream( position, loadedMaps[ lastMapFilePath ].staticObjects );
-		}
-		public static void Stream( Vector3 position, Dictionary<string, MapObject[]> data ) {
-			if( disableStreaming )
-				return;
-			var currentSectionHash = getSectionHash( position, out int currentRow, out int currentColumn );
+		private void stream( Vector3 position, out string currentSectionHash ) {
+			currentSectionHash = getSectionHash( position, out int currentRow, out int currentColumn );
 			if( currentSectionHash == lastSectionHash )
 				return;
-			(disableStreaming, lastSectionHash) = (true, currentSectionHash);
+				
+			var currentSectionsHashes = getCurrentSectionsHashes( currentRow, currentColumn );
+
+			var sectionToDisable = from ls in lastSectionsHashes
+								   from cs in currentSectionsHashes
+								   where ls != cs && sections.ContainsKey( ls ) && ls.Length > 0
+								   select ls;
+								   
+			foreach( var std in sectionToDisable )
+				sections[ std ].gameObject.SetActive( false );
+
+			var sectionToEnable = from cs in currentSectionsHashes
+								  where sections.ContainsKey( cs )
+								  select cs;
+			
+			foreach( var std in sectionToEnable )
+				sections[ std ].gameObject.SetActive( true );
+
+			for( int i = 0; i < MAX_SECTIONS_COUNT; ++i )
+				lastSectionsHashes[ i ] = currentSectionsHashes[ i ];
+
+			lastSectionHash = currentSectionHash;
+
+		}
+		private string[] getCurrentSectionsHashes( int row, int column ) {
+			var rowUp = row + 1;
+			var rowDown = row - 1;
+			var columnLeft = column - 1;
+			var columnRight = column + 1;
+			return new string[ MAX_SECTIONS_COUNT ] {
+				getSectionHash( rowUp, columnLeft ),
+				getSectionHash( rowUp, column ),
+				getSectionHash( rowUp, columnRight ),
+				getSectionHash( row, columnLeft ),
+				getSectionHash( row, column ),
+				getSectionHash( row, columnRight ),
+				getSectionHash( rowDown, columnLeft ),
+				getSectionHash( rowDown, column ),
+				getSectionHash( rowDown, columnRight )
+			};
+		}
+		private void export( Action<bool> onCompleted ) {
 			API.Async.Run( delegate {
-				generateSectionsForRebuild( data, out var sectionToLoad, out var sectionToDestroy );
-				return (sectionToLoad, sectionToDestroy);
-			}, sections => { rebuildSections( data, sections.Item1, sections.Item2 ); } );
-		}
-		
-		private readonly string path;
-		#if MAP_EDITOR_TOOL_ONLY
-		private readonly StringBuilder comments; 
-		#endif
-		private readonly Dictionary<string, MapObject[]> staticObjects;
-		
-		private ZoneInfo[] zones;
-		private RestartInfo[] restarts;
-		private LocationTeleport[] locationTeleports;
-		private Vector3[] mapTeleports;
-		private Vector3 defaultPlayerPosition;
-		private float defaultPlayerHeading;
-
-		private Map( string mapPath ) {
-			#if MAP_EDITOR_TOOL_ONLY
-			comments = new StringBuilder();
-			#endif
-			(path, staticObjects) = (mapPath, new Dictionary<string, MapObject[]>());
-		}
-
-		private void unload() {
-			#if MAP_EDITOR_TOOL_ONLY
-			comments.Clear();
-			#endif
-			(zones, restarts, locationTeleports) = (new ZoneInfo[ 0 ], new RestartInfo[ 0 ], new LocationTeleport[ 0 ]);
-			(mapTeleports, defaultPlayerPosition, defaultPlayerHeading) = (new Vector3[ 0 ], Vector3.zero, 0f);
-			staticObjects.Clear();
-		}
-		private void load( Action<bool> onCompleted ) => API.Async.Run( readFile, onCompleted ); 
-		private bool readFile() {
-			try {
-				var commentsMode = true;
-				#if MAP_EDITOR_TOOL_ONLY
-				var tmpComments = new StringBuilder();
-				#endif
-				var tmpDefaultPlayerPosition = Vector3.zero;
-				var tmpDefaultPlayerHeading = 0f;
-				var tmpRestarts = new List<RestartInfo>();
-				var tmpMapTeleports = new List<Vector3>();
-				var tmpLocationTeleports = new List<LocationTeleport>();
-				var tmpZones = new List<ZoneInfo>();
-				var tmpStaticObjects = new Dictionary<string, List<MapObject>>();
-				using( TextReader reader = new StreamReader( path ) ) {
-					while( reader.Peek() > -1 ) {
-						var line = reader.ReadLine();
-						var ln = Regex.Replace( line, "[ \t]{1,}", " ", RegexOptions.Compiled ).Trim();
-						if( ln.Length == 0 )
-							continue;
-						if( ln[ 0 ] == '#' ) {
-							commentsMode = false;
-							continue;
-						}
-						if( commentsMode ) {
-							#if MAP_EDITOR_TOOL_ONLY
-							tmpComments.AppendLine( line );
-							#endif
-							continue;
-						}
-						var split = ln.Split( ' ' );
-						var command = split[ 0 ];
-						switch( command ) {
-							case "OVERRIDE_DEFAULT_PLAYER_POSITION":
-							tmpDefaultPlayerPosition = new Vector3( float.Parse( split[ 1 ] ), float.Parse( split[ 2 ] ), float.Parse( split[ 3 ] ) );
-							tmpDefaultPlayerHeading = float.Parse( split[ 4 ] );
-							continue;
-							case "ADD_HOSPITAL_RESTART":
-							tmpRestarts.Add( new RestartInfo( false, float.Parse( split[ 1 ] ), float.Parse( split[ 2 ] ), float.Parse( split[ 3 ] ), float.Parse( split[ 4 ] ), ushort.Parse( split[ 5 ] ) ) );
-							continue;
-							case "ADD_POLICE_RESTART":
-							tmpRestarts.Add( new RestartInfo( true, float.Parse( split[ 1 ] ), float.Parse( split[ 2 ] ), float.Parse( split[ 3 ] ), float.Parse( split[ 4 ] ), ushort.Parse( split[ 5 ] ) ) );
-							continue;
-							case "ADD_MAP_TELEPORT":
-							tmpMapTeleports.Add( new Vector3( float.Parse( split[ 1 ] ), float.Parse( split[ 2 ] ), float.Parse( split[ 3 ] ) ) );
-							continue;
-							case "ADD_LOCATION_TELEPORT":
-							tmpLocationTeleports.Add( new LocationTeleport( float.Parse( split[ 1 ] ), float.Parse( split[ 2 ] ), float.Parse( split[ 3 ] ), float.Parse( split[ 4 ] ), ushort.Parse( split[ 5 ] ) ) );
-							continue;
-							case "ADD_ZONE":
-							tmpZones.Add( new ZoneInfo( byte.Parse( split[ 1 ] ), float.Parse( split[ 2 ] ), float.Parse( split[ 3 ] ), float.Parse( split[ 4 ] ), float.Parse( split[ 5 ] ), float.Parse( split[ 6 ] ), float.Parse( split[ 7 ] ), ushort.Parse( split[ 8 ] ) ) );
-							continue;
-							case "ADD_OBJECT":
-							var item = new MapObject( split[ 1 ], split[ 2 ], float.Parse( split[ 3 ] ), float.Parse( split[ 4 ] ), float.Parse( split[ 5 ] ), float.Parse( split[ 6 ] ), float.Parse( split[ 7 ] ), float.Parse( split[ 8 ] ) );
-							var hash = getSectionHash( item.Position );
-							if( !tmpStaticObjects.ContainsKey( hash ) )
-								tmpStaticObjects.Add( hash, new List<MapObject>() );
-							tmpStaticObjects[ hash ].Add( item );
-							continue;
+				try {
+					using( TextWriter tw = new StreamWriter( currentMapPath ) ) {
+						tw.Write( comments );
+						//tw.WriteLine( "# ZONES" );
+						foreach( var mapObjects in objects.Values ) {
+							//tw.WriteLine( "# MAP OBJECTS" );
+							foreach( var obj in mapObjects ) {
+								if( obj.IsRemoved )
+									continue;
+								var pos = obj.Position;
+								var rot = obj.Rotation.eulerAngles;
+								tw.WriteLine( $"ADD_OBJECT {obj.Mod} {obj.File} {pos.x} {pos.y} {pos.z} {rot.x} {rot.y} {rot.z} {obj.OnHour} {obj.OffHour}" );	
+							}
 						}
 					}
-				}
-				#if MAP_EDITOR_TOOL_ONLY
-				tmpComments.AppendLine( "#" );
-				comments.Append( tmpComments );
-				#endif
-				(zones, restarts, locationTeleports ) = (tmpZones.ToArray(), tmpRestarts.ToArray(), tmpLocationTeleports.ToArray());
-				(mapTeleports, defaultPlayerPosition, defaultPlayerHeading) = (tmpMapTeleports.ToArray(), tmpDefaultPlayerPosition, tmpDefaultPlayerHeading);
-				foreach( var item in tmpStaticObjects )
-					staticObjects.Add( item.Key, item.Value.ToArray() );
-				return true;
-			} catch( Exception e ) { API.Logger.Print( e.Message ); }
-			return false;
+					return true;
+				} catch( Exception e ) { API.Logger.Print( e.Message ); }
+				return false;
+			}, state => { onCompleted.Invoke( state ); } );
 		}
-
+		
 	}	
 	
 }
