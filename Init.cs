@@ -1,6 +1,7 @@
 using System.Collections;
 using System.IO;
 using UnityEngine;
+using System.Linq;
 
 public class Init : MonoBehaviour {
 	
@@ -8,7 +9,7 @@ public class Init : MonoBehaviour {
 
 		System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
 			
-        while( Error.IsWait || Loader.IsWait || MapsSelector.IsWait || MapsViewer.IsWait )
+        while( Error.IsWait || Loader.IsWait || MapsSelector.IsWait || MapsViewer.IsWait || EditObject.IsWait || AddObject.IsWait || ListBox.IsWait )
 			yield return null;
 			
 		#if UNITY_EDITOR
@@ -21,18 +22,20 @@ public class Init : MonoBehaviour {
 		
 		var wait = true;
 		var hasErrors = false;
-		
-		HAR.Core.Map.Initialize( state => { hasErrors = !state; wait = false; } );
+		string[] mapsPaths = null;
+
+		HAR.Core.Map.FindAllPaths( (state, paths) => { mapsPaths = paths; hasErrors = !state; wait = false; } );
 		
 		while( wait ) yield return null;
 
-		if( hasErrors ) { 
+		if( hasErrors || mapsPaths == null ) { 
 			Error.Activate( "Error loading maps info!" );
 			yield break; 
 		}
+		
+		MapsSelector.SetFiles.Invoke( mapsPaths );
 
-		HAR.Core.Map.Each( path => MapsSelector.AddMapInfo( path ) );
-		MapsSelector.Enable = true;
+		MapsSelector.OnEnable.Invoke( true );
 		Loader.Enable = false;
 		
     }
